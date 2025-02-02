@@ -1,0 +1,24 @@
+AndroidMediaVault/
+│
+├── android-backup.py          # Main application script
+├── requirements.py            # Requirements installer
+├── README.md                 # Primary documentation
+├── README.html              # HTML documentation
+├── README.txt              # Plain text documentation
+├── LICENSE                # MIT License
+│
+├── RESOURCES/            # Resource directory for app
+│   └── .gitkeep
+│
+├── platform-tools/      # Android platform tools (auto-downloaded)
+│   └── .gitkeep
+│
+└── Backup/            # Default backup directory
+    ├── Camera/
+    ├── Screenshots/
+    ├── Downloads/
+    ├── WhatsApp Media/
+    ├── Telegram/
+    ├── Instagram/
+    ├── TikTok/
+    └── SnapChat/
