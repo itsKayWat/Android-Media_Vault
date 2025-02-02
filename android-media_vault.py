@@ -385,7 +385,48 @@ def remove_backed_up_files(successful_files):
             print(f"Error removing {os.path.basename(file_path)}: {str(e)}")
     print("\nFile removal completed.")
 
-def backup_folder(source_folder, dest_folder, total_files, processed_files, successful_files, failed_files):
+def organize_backup_folder(backup_dir):
+    """Organize backed up files by type and date"""
+    print("\nOrganizing backed up files...")
+    
+    for root, _, files in os.walk(backup_dir):
+        for file in files:
+            file_path = os.path.join(root, file)
+            try:
+                # Get file creation/modification time
+                file_time = os.path.getmtime(file_path)
+                file_date = time.strftime('%Y-%m-%d', time.localtime(file_time))
+                
+                # Determine file type
+                _, ext = os.path.splitext(file.lower())
+                if ext in ['.mp4', '.mov', '.avi']:
+                    type_folder = 'Videos'
+                elif ext in ['.jpg', '.jpeg', '.png']:
+                    type_folder = 'Photos'
+                else:
+                    type_folder = 'Other'
+                
+                # Create type and date folders
+                type_path = os.path.join(root, type_folder)
+                date_path = os.path.join(type_path, file_date)
+                os.makedirs(date_path, exist_ok=True)
+                
+                # Move file to new location
+                new_path = os.path.join(date_path, file)
+                if os.path.exists(new_path):
+                    # If file exists, append timestamp to filename
+                    base, ext = os.path.splitext(file)
+                    new_path = os.path.join(date_path, f"{base}_{int(time.time())}{ext}")
+                
+                os.rename(file_path, new_path)
+                print(f"Organized: {file} -> {type_folder}/{file_date}/")
+                
+            except Exception as e:
+                print(f"Error organizing {file}: {str(e)}")
+                continue
+
+def backup_folder(source_folder, dest_folder, total_files, processed_files, 
+                 successful_files, failed_files, delete_after_backup=False):
     """Backup a single folder"""
     print(f"\nProcessing {source_folder}...")
     print("=" * 50)
@@ -396,10 +437,14 @@ def backup_folder(source_folder, dest_folder, total_files, processed_files, succ
     
     try:
         # Get list of files in the folder
-        result = subprocess.run([ADB_PATH, 'shell', f'find /storage/emulated/0 -type f -path "*/DCIM/{source_folder}/*"'],
+        result = subprocess.run([ADB_PATH, 'shell', f'find "{source_folder}" -type f'],
                               capture_output=True, text=True)
         files = result.stdout.strip().split('\n')
-        files = [f for f in files if f]  # Remove empty entries
+        files = [f for f in files if f and  # Remove empty entries
+                any(f.lower().endswith(ext) for ext in ['.jpg', '.jpeg', '.png', '.mp4', '.mov', '.avi'])]
+        
+        # Create destination folder if it doesn't exist
+        os.makedirs(dest_folder, exist_ok=True)
         
         # Process each file
         for file_count, source_path in enumerate(files, 1):
@@ -412,9 +457,15 @@ def backup_folder(source_folder, dest_folder, total_files, processed_files, succ
             # Attempt backup with retries
             if backup_file(source_path, dest_path):
                 successful_files.append(source_path)
+                # Only delete if this folder was selected for backup and deletion was enabled
+                if delete_after_backup and REMOVE_AFTER_BACKUP:
+                    try:
+                        subprocess.run([ADB_PATH, 'shell', f'rm "{source_path}"'])
+                    except Exception as e:
+                        print(f"Warning: Could not delete {source_path}: {str(e)}")
             else:
                 failed_files.append(source_path)
-                # Log failed transfer and continue
+                # Log failed transfer
                 with open(log_file, 'a') as f:
                     f.write(f"Failed to backup: {source_path}\n")
                     f.write(f"Destination: {dest_path}\n")
@@ -424,23 +475,27 @@ def backup_folder(source_folder, dest_folder, total_files, processed_files, succ
             
             processed_files += 1
             
+        # After successful backup, organize the files
+        organize_backup_folder(dest_folder)
         return True
         
     except Exception as e:
-        # Log folder-level error and continue
+        # Log folder-level error
         with open(log_file, 'a') as f:
             f.write(f"Error processing folder {source_folder}: {str(e)}\n")
             f.write(f"Time: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
             f.write("-" * 50 + "\n")
-        print(f"\nError processing folder {source_folder} - logged to failed_transfers.log")
-        return True  # Continue with next folder
+        print(f"\nError processing folder {source_folder}: {str(e)}")
+        print("Error logged to failed_transfers.log")
+        return False
 
 def print_progress(folder, current, total_folder, total_files, processed_files, current_file, dest_path):
     """Print progress information"""
-    folder_progress = (current / total_folder) * 100
-    total_progress = ((processed_files + current) / total_files) * 100
+    folder_progress = (current / total_folder) * 100 if total_folder > 0 else 0
+    total_progress = ((processed_files + current) / total_files) * 100 if total_files > 0 else 0
     
-    print(f"Current folder: {folder} - {folder_progress:.1f}% ({current}/{total_folder})")
+    print(f"\nCurrent folder: {folder}")
+    print(f"Progress: {folder_progress:.1f}% ({current}/{total_folder})")
     print(f"Total progress: {total_progress:.1f}% ({processed_files + current}/{total_files})")
     print(f"Current file: {current_file}")
     print(f"Destination: {dest_path}")
@@ -449,10 +504,12 @@ def backup_file(source_path, dest_path, retries=3):
     """Attempt to backup a file with retries"""
     for attempt in range(retries):
         try:
+            print(f"\nBacking up: {os.path.basename(source_path)}")
             result = subprocess.run([ADB_PATH, 'pull', source_path, dest_path], 
                                   capture_output=True, text=True, timeout=300)
             
             if result.returncode == 0:
+                print(f"Successfully backed up: {os.path.basename(source_path)}")
                 return True
                 
             if "error: device offline" in result.stderr or "error: no devices/emulators found" in result.stderr:
@@ -566,6 +623,10 @@ def main():
     if start_backup(backup_dir, folders_to_backup, successful_files, failed_files):
         if remove_files and successful_files:
             remove_backed_up_files(successful_files)
+        
+        # Organize all backed up files
+        print("\nOrganizing backed up files by type and date...")
+        organize_backup_folder(backup_dir)
     
     # Print final summary
     print("\n" + "=" * 50)
@@ -596,24 +657,74 @@ def start_backup(backup_dir, folders_to_backup, successful_files, failed_files):
     print("\nScanning folders...")
     total_files = 0
     total_size = 0
+    folder_info = []  # Store info about each folder
     
-    for folder in folders_to_backup:
+    for i, folder in enumerate(folders_to_backup, 1):
         files, size = scan_folder(folder)
         if files > 0:
-            print(f"Found {files} files in {folder} ({size:.1f} MB)")
+            print(f"{i}. Found {files} files in {folder} ({size:.1f} MB)")
+            folder_info.append((folder, files, size))
             total_files += files
             total_size += size
     
     print(f"\nTotal files to backup: {total_files}")
     print(f"Total size: {total_size:.1f} MB")
     
-    input("\nPress Enter to start backup...")
+    print("\nOptions:")
+    print("Press Enter or '0' to backup everything")
+    print("Or enter folder numbers (comma-separated) to backup specific folders")
+    print("Example: 1,3,5 to backup only those folders")
     
-    # Process each selected folder
+    choice = input("\nYour choice: ").strip()
+    
+    if choice and choice != '0':  # If user entered numbers
+        try:
+            # Split by comma and handle potential empty strings
+            selected_indices = [int(x.strip()) - 1 for x in choice.split(',') if x.strip()]
+            
+            # Validate all indices before proceeding
+            if not all(0 <= i < len(folder_info) for i in selected_indices):
+                print("Invalid folder number(s). Please try again.")
+                return start_backup(backup_dir, folders_to_backup, successful_files, failed_files)
+            
+            folders_to_backup = [folder_info[i][0] for i in selected_indices]
+            
+            # Recalculate totals for selected folders
+            total_files = sum(folder_info[i][1] for i in selected_indices)
+            total_size = sum(folder_info[i][2] for i in selected_indices)
+            
+            print(f"\nSelected {len(folders_to_backup)} folders")
+            print(f"Files to backup: {total_files}")
+            print(f"Total size: {total_size:.1f} MB")
+            
+            if not input("\nPress Enter to continue or 'q' to quit: ").lower().startswith('q'):
+                return process_backup(backup_dir, folders_to_backup, total_files, successful_files, failed_files)
+            return False
+            
+        except (ValueError, IndexError) as e:
+            print(f"Invalid selection format. Please try again.")
+            return start_backup(backup_dir, folders_to_backup, successful_files, failed_files)
+    
+    # If user pressed Enter or entered '0', proceed with all folders
+    if not input("\nPress Enter to continue or 'q' to quit: ").lower().startswith('q'):
+        return process_backup(backup_dir, folders_to_backup, total_files, successful_files, failed_files)
+    return False
+
+def process_backup(backup_dir, folders_to_backup, total_files, successful_files, failed_files):
+    """Process the actual backup of selected folders"""
     processed_files = 0
+    
+    # Create a set of selected folder paths for easy lookup
+    selected_folder_paths = {os.path.normpath(folder) for folder in folders_to_backup}
+    
     for folder in folders_to_backup:
-        dest_folder = os.path.join(backup_dir, folder)
-        if not backup_folder(folder, dest_folder, total_files, processed_files, successful_files, failed_files):
+        dest_folder = os.path.join(backup_dir, os.path.basename(folder))
+        
+        # Only process deletion for folders that were explicitly selected
+        delete_after_backup = folder in selected_folder_paths
+        
+        if not backup_folder(folder, dest_folder, total_files, processed_files, 
+                           successful_files, failed_files, delete_after_backup):
             print("\nBackup process interrupted.")
             return False
             
@@ -621,13 +732,12 @@ def start_backup(backup_dir, folders_to_backup, successful_files, failed_files):
 
 def setup_backup_location():
     """Setup and create backup directory structure"""
-    # Get the directory where the script is located
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    default_backup_dir = os.path.join(script_dir, 'Backup')
-    
     print("\nBackup Location Setup")
     print("====================")
-    print(f"Default backup location: {default_backup_dir}")
+    
+    # Default location is in script directory
+    default_location = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Backup')
+    print(f"Default backup location: {default_location}")
     
     print("\nWould you like to:")
     print("1. Use default location")
@@ -636,23 +746,37 @@ def setup_backup_location():
     while True:
         choice = input("\nEnter choice (1-2): ")
         if choice == "1":
-            backup_dir = default_backup_dir
+            backup_dir = default_location
             break
         elif choice == "2":
-            backup_dir = input("\nEnter custom backup location: ")
+            backup_dir = input("\nEnter backup location: ").strip('"')
             break
         else:
             print("Invalid choice. Please enter 1 or 2.")
     
     # Create main backup directory
-    os.makedirs(backup_dir, exist_ok=True)
     print(f"\nCreating backup directory at: {backup_dir}")
+    os.makedirs(backup_dir, exist_ok=True)
     
     # Create folder structure
     print("Creating folder structure...")
-    folders = ['Camera', 'Screenshots', 'Downloads', 'WhatsApp Media', 
-              'Telegram', 'Instagram', 'TikTok', 'SnapChat']
-              
+    folders = [
+        'Camera',
+        'Screenshots',
+        'Downloads',
+        'WhatsApp Media',
+        'Telegram',
+        'Instagram',
+        'TikTok',
+        'SnapChat',
+        'Screen Recordings',
+        'Video Captures',
+        'Video Editor',
+        'Facebook',
+        'Movies',
+        'Other'  # For miscellaneous files
+    ]
+    
     for folder in folders:
         folder_path = os.path.join(backup_dir, folder)
         os.makedirs(folder_path, exist_ok=True)
@@ -660,8 +784,69 @@ def setup_backup_location():
     
     return backup_dir
 
+def get_device_folders():
+    """Get list of folders and files to scan on device"""
+    base_paths = [
+        # DCIM directory and its subdirectories
+        '/storage/emulated/0/DCIM',
+        '/storage/emulated/0/DCIM/Camera',
+        '/storage/emulated/0/DCIM/Videocaptures',
+        '/storage/emulated/0/DCIM/Video Editor',
+        '/storage/emulated/0/DCIM/Snapchat',
+        '/storage/emulated/0/DCIM/Screen recordings',
+        '/storage/emulated/0/DCIM/RedTiger',
+        '/storage/emulated/0/DCIM/Facebook',
+        '/storage/emulated/0/DCIM/Dicks Refund',
+        # Movies directory and its subdirectories
+        '/storage/emulated/0/Movies',
+        '/storage/emulated/0/Movies/TikTok',
+        '/storage/emulated/0/Movies/Facetune'
+    ]
+    
+    return base_paths
+
+def scan_folder(folder_path):
+    """Scan a folder for media files"""
+    try:
+        # First, check if the folder exists
+        check_result = subprocess.run([ADB_PATH, 'shell', f'[ -d "{folder_path}" ] && echo "exists"'],
+                                    capture_output=True, text=True)
+        
+        files = []
+        total_size = 0
+        
+        # If it's a directory, scan recursively
+        if "exists" in check_result.stdout:
+            result = subprocess.run([ADB_PATH, 'shell', f'find "{folder_path}" -type f -name "*.*"'],
+                                  capture_output=True, text=True)
+            files.extend([f for f in result.stdout.strip().split('\n') if f and 
+                       any(f.lower().endswith(ext) for ext in ['.jpg', '.jpeg', '.png', '.mp4', '.mov', '.avi', '.mp3'])])
+        
+        # Also check if it's a direct file path
+        else:
+            result = subprocess.run([ADB_PATH, 'shell', f'[ -f "{folder_path}" ] && echo "{folder_path}"'],
+                                  capture_output=True, text=True)
+            if result.stdout.strip():
+                files.append(folder_path)
+        
+        # Calculate total size
+        for file in files:
+            size_result = subprocess.run([ADB_PATH, 'shell', f'stat -c%s "{file}"'],
+                                       capture_output=True, text=True)
+            try:
+                total_size += int(size_result.stdout.strip())
+            except ValueError:
+                continue
+                
+        return len(files), total_size / (1024 * 1024)  # Convert to MB
+    except Exception as e:
+        print(f"Error scanning {folder_path}: {str(e)}")
+        return 0, 0
+
 def select_backup_folders():
     """Let user select which folders to backup"""
+    folders = get_device_folders()
+    
     print("\nWhat would you like to backup?")
     print("1. Everything")
     print("2. Select specific folders")
@@ -669,40 +854,21 @@ def select_backup_folders():
     while True:
         choice = input("\nEnter choice (1-2): ")
         if choice == "1":
-            return ['Camera', 'Screenshots', 'Downloads', 'WhatsApp Media', 
-                   'Telegram', 'Instagram', 'TikTok', 'SnapChat']
+            return folders
         elif choice == "2":
-            # Add specific folder selection logic here
-            print("\nFolder selection not implemented yet.")
-            print("Defaulting to everything...")
-            return ['Camera', 'Screenshots', 'Downloads', 'WhatsApp Media', 
-                   'Telegram', 'Instagram', 'TikTok', 'SnapChat']
+            print("\nSelect folders to backup:")
+            selected_folders = []
+            for i, folder in enumerate(folders, 1):
+                print(f"{i}. {folder}")
+            
+            selections = input("\nEnter folder numbers (comma-separated): ")
+            try:
+                indices = [int(x.strip()) - 1 for x in selections.split(',')]
+                return [folders[i] for i in indices if 0 <= i < len(folders)]
+            except:
+                print("Invalid selection. Please try again.")
         else:
             print("Invalid choice. Please enter 1 or 2.")
-
-def scan_folder(folder):
-    """Scan a folder and return file count and size"""
-    try:
-        result = subprocess.run([ADB_PATH, 'shell', f'find /storage/emulated/0 -type f -path "*/DCIM/{folder}/*"'],
-                              capture_output=True, text=True)
-        files = result.stdout.strip().split('\n')
-        files = [f for f in files if f]  # Remove empty entries
-        
-        total_size = 0
-        if files:
-            # Get size of each file
-            for file in files:
-                size_result = subprocess.run([ADB_PATH, 'shell', f'stat -c%s "{file}"'],
-                                          capture_output=True, text=True)
-                try:
-                    total_size += int(size_result.stdout.strip())
-                except ValueError:
-                    continue
-                    
-        return len(files), total_size / (1024 * 1024)  # Convert to MB
-    except Exception as e:
-        print(f"Error scanning {folder}: {str(e)}")
-        return 0, 0
 
 if __name__ == "__main__":
     try:
